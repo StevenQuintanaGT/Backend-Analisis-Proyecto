@@ -1,9 +1,11 @@
-from rest_framework import serializers
 from django.contrib.auth.models import User
+from django.db import transaction
+from rest_framework import serializers
+
 from .models import (
     Cliente, Producto, Venta, DetalleVenta, Vendedor, RegistroVisita,
     Ruta, ClienteRuta, CatPresentacion, CatEstatusCredito, ReportFile, UserProfile,
-    EvidenciaFotografica,
+    EvidenciaFotografica, CatTiempoCliente, CatResultadoVisita,
 )
 
 
@@ -55,13 +57,113 @@ class ClienteRutaSerializer(serializers.ModelSerializer):
         fields = ['ruta', 'cliente', 'orden_visita', 'id_tiempo_cliente', 'hora_inicio', 'hora_fin', 'resultado_visita', 'observaciones']
 
 
+class ClienteRutaInputSerializer(serializers.Serializer):
+    nit_cliente = serializers.CharField()
+    orden_visita = serializers.IntegerField(min_value=1)
+    id_tiempo_cliente = serializers.IntegerField()
+    resultado_visita = serializers.CharField(required=False, allow_blank=True)
+    observaciones = serializers.CharField(required=False, allow_blank=True)
+    hora_inicio = serializers.DateTimeField(required=False)
+    hora_fin = serializers.DateTimeField(required=False)
+
+
 # Rutas con sus clientes ya ordenados.
 class RutaSerializer(serializers.ModelSerializer):
     clienterutas = ClienteRutaSerializer(source='clienteruta_set', many=True, read_only=True)
+    clientes = ClienteRutaInputSerializer(write_only=True, many=True, required=False)
 
     class Meta:
         model = Ruta
-        fields = ['id_ruta', 'dpi_vendedor', 'fecha', 'nombre', 'kilometros_estimados', 'tiempo_planificado_min', 'tiempo_real_min', 'resultado_global', 'clienterutas']
+        fields = [
+            'id_ruta',
+            'dpi_vendedor',
+            'fecha',
+            'nombre',
+            'kilometros_estimados',
+            'tiempo_planificado_min',
+            'tiempo_real_min',
+            'resultado_global',
+            'estado',
+            'clienterutas',
+            'clientes',
+        ]
+
+    def validate_clientes(self, value):
+        if not value:
+            raise serializers.ValidationError('Debe proporcionar al menos un cliente.')
+        nits = set()
+        ordenes = set()
+        for item in value:
+            nit = item['nit_cliente']
+            if nit in nits:
+                raise serializers.ValidationError(f"El cliente '{nit}' está repetido.")
+            nits.add(nit)
+            orden = item['orden_visita']
+            if orden in ordenes:
+                raise serializers.ValidationError(f"El orden de visita '{orden}' está repetido.")
+            ordenes.add(orden)
+        return value
+
+    def create(self, validated_data):
+        clientes_data = validated_data.pop('clientes', [])
+        if not clientes_data:
+            raise serializers.ValidationError({'clientes': 'Debe proporcionar al menos un cliente.'})
+        with transaction.atomic():
+            ruta = super().create(validated_data)
+            if clientes_data:
+                self._replace_clientes(ruta, clientes_data)
+        return ruta
+
+    def update(self, instance, validated_data):
+        clientes_data = validated_data.pop('clientes', None)
+        with transaction.atomic():
+            ruta = super().update(instance, validated_data)
+            if clientes_data is not None:
+                self._replace_clientes(ruta, clientes_data)
+        return ruta
+
+    def _replace_clientes(self, ruta, clientes_data):
+        nits = [item['nit_cliente'] for item in clientes_data]
+        clientes = Cliente.objects.filter(nit__in=nits)
+        clientes_map = {cliente.nit: cliente for cliente in clientes}
+        faltantes = sorted({nit for nit in nits if nit not in clientes_map})
+        if faltantes:
+            raise serializers.ValidationError({'clientes': [f"Cliente '{nit}' no existe" for nit in faltantes]})
+
+        tiempos_ids = {item['id_tiempo_cliente'] for item in clientes_data}
+        tiempos = CatTiempoCliente.objects.filter(id_tiempo_cliente__in=tiempos_ids)
+        tiempos_map = {tiempo.id_tiempo_cliente: tiempo for tiempo in tiempos}
+        faltantes_tiempo = sorted({tiempo_id for tiempo_id in tiempos_ids if tiempo_id not in tiempos_map})
+        if faltantes_tiempo:
+            raise serializers.ValidationError({'clientes': [f"Tiempo cliente '{tiempo_id}' no existe" for tiempo_id in faltantes_tiempo]})
+
+        resultado_ids = {item.get('resultado_visita') for item in clientes_data if item.get('resultado_visita')}
+        if resultado_ids:
+            resultados = CatResultadoVisita.objects.filter(resultado_visita__in=resultado_ids)
+            resultados_map = {resultado.resultado_visita: resultado for resultado in resultados}
+            faltantes_resultado = sorted(resultado_ids - resultados_map.keys())
+            if faltantes_resultado:
+                raise serializers.ValidationError({'clientes': [f"Resultado visita '{resultado}' no existe" for resultado in faltantes_resultado]})
+        else:
+            resultados_map = {}
+
+        ClienteRuta.objects.filter(ruta=ruta).delete()
+        registros = []
+        for item in sorted(clientes_data, key=lambda x: x['orden_visita']):
+            cliente = clientes_map[item['nit_cliente']]
+            resultado_visita_id = item.get('resultado_visita') or 'PENDIENTE'
+            registro = ClienteRuta(
+                ruta=ruta,
+                cliente=cliente,
+                orden_visita=item['orden_visita'],
+                id_tiempo_cliente=tiempos_map[item['id_tiempo_cliente']],
+                resultado_visita_id=resultado_visita_id,
+                observaciones=item.get('observaciones'),
+                hora_inicio=item.get('hora_inicio'),
+                hora_fin=item.get('hora_fin'),
+            )
+            registros.append(registro)
+        ClienteRuta.objects.bulk_create(registros)
 
 
 # Vendedores incluyen un resumen textual del nivel de éxito.

@@ -103,7 +103,7 @@ class ClienteViewSet(viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         nit = request.GET.get('n') or request.GET.get('nit')
-        qs = self.queryset
+        qs = self.get_queryset()
         if nit:
             qs = qs.filter(nit__iexact=nit)
         page = self.paginate_queryset(qs)
@@ -121,10 +121,13 @@ class ProductoViewSet(viewsets.ModelViewSet):
 
     def list(self, request, *args, **kwargs):
         codigo = request.GET.get('codigo')
-        qs = self.queryset
+        qs = self.get_queryset()
         if codigo:
             qs = qs.filter(codigo__iexact=codigo)
-        return super().list(request, *args, **kwargs) if not codigo else Response(self.get_serializer(qs, many=True).data)
+        if codigo:
+            serializer = self.get_serializer(qs, many=True)
+            return Response(serializer.data)
+        return super().list(request, *args, **kwargs)
 
 # Control de vendedores y un endpoint auxiliar para registrar visitas.
 class VendedorViewSet(viewsets.ModelViewSet):

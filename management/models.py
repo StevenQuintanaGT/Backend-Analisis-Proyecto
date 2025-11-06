@@ -134,6 +134,13 @@ class Ruta(models.Model):
     tiempo_planificado_min = models.IntegerField(null=True, blank=True)
     tiempo_real_min = models.IntegerField(null=True, blank=True)
     resultado_global = models.CharField(max_length=50, null=True, blank=True)
+    ESTADOS = [
+        ('PENDIENTE', 'Pendiente'),
+        ('EN_PROCESO', 'En proceso'),
+        ('COMPLETADA', 'Completada'),
+        ('CANCELADA', 'Cancelada'),
+    ]
+    estado = models.CharField(max_length=20, choices=ESTADOS, default='PENDIENTE')
     creado_en = models.DateTimeField(default=timezone.now)
     actualizado_en = models.DateTimeField(default=timezone.now)
 
